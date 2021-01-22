@@ -12,8 +12,6 @@ extern "user32" fn MessageBoxW(
     uType: UINT,
 ) callconv(WINAPI) c_int;
 
-const RECT = extern struct { left: i32, top: i32, right: i32, bottom: i32 };
-
 extern "user32" fn AdjustWindowRectEx(lpRect: *RECT, dwStyle: windows.DWORD, bMenu: windows.BOOL, dwExStyle: windows.DWORD) callconv(windows.WINAPI) windows.BOOL;
 
 extern "user32" fn DefWindowProcW(windows.HWND, windows.UINT, windows.WPARAM, windows.LPARAM) callconv(windows.WINAPI) windows.LRESULT;
@@ -125,8 +123,6 @@ extern "user32" fn PostMessageW(
 
 const MSG = user32.MSG;
 
-const ATOM = c_ushort;
-
 const CS_OWNDC = 0x0020;
 
 extern "user32" fn RegisterClassExW(arg1: *const WNDCLASSEXW) callconv(WINAPI) ATOM;
@@ -163,7 +159,7 @@ const WindowCreatePipe = struct {
     in_x: ?i32,
     in_y: ?i32,
     in_flags: WindowCreateFlags,
-    reset_event: std.ResetEvent,
+    reset_event: std.Thread.ResetEvent,
 };
 
 const WindowCreateFlags = struct {
@@ -172,15 +168,15 @@ const WindowCreateFlags = struct {
 
 pub const Bitmap = struct {
     pixels: []Pixel,
-    width: u32,
-    height: u32,
-    stride: u32,
-    pixel_rows: u32,
-    x_offset: u32,
-    y_offset: u32,
+    width: usize,
+    height: usize,
+    stride: usize,
+    pixel_rows: usize,
+    x_offset: usize,
+    y_offset: usize,
     direction: Direction,
     const Direction = enum { TopDown, BottomUp };
-    pub fn create(allocator: *Allocator, width: u32, height: u32, direction: Direction) !@This() {
+    pub fn create(allocator: *Allocator, width: usize, height: usize, direction: Direction) !@This() {
         const pixels = try allocator.alloc(Pixel, width * height);
         return @This(){
             .pixels = pixels,
@@ -194,17 +190,30 @@ pub const Bitmap = struct {
         };
     }
 
-    const Row = struct { row: u32, pixels: []Pixel };
+    pub fn subBitmap(this: *@This(), x: usize, y: usize, width: usize, height: usize) @This() {
+        var bmp = this.*;
+        bmp.x_offset += x;
+        bmp.y_offset += y;
+        bmp.width = width;
+        bmp.height = height;
+        return bmp;
+    }
+
+    const Row = struct { row: usize, pixels: []Pixel };
+
+    pub fn getPixel(this: *@This(), x: usize, y: usize) *Pixel {
+        return &this.pixels[x + this.x_offset + (y + this.y_offset) * this.stride];
+    }
 
     const RowIterator = struct {
-        current: u32 = 0,
+        current: usize = 0,
         pixels: []Pixel,
-        height: u32,
-        width: u32,
-        stride: u32,
-        pixel_rows: u32,
-        x_offset: u32,
-        y_offset: u32,
+        height: usize,
+        width: usize,
+        stride: usize,
+        pixel_rows: usize,
+        x_offset: usize,
+        y_offset: usize,
         pub fn next(self: *@This()) ?Row {
             if (self.current == self.height) {
                 return null;
@@ -241,16 +250,16 @@ pub const Bitmap = struct {
 };
 
 fn windowProc(win: HWND, msg: UINT, wparam: WPARAM, lparam: LPARAM) callconv(WINAPI) LRESULT {
-    const fail_result = @intToPtr(LRESULT, 1);
+    const fail_result = 1;
     return switch (msg) {
         user32.WM_CLOSE => {
             const window = @intToPtr(*Instance.Window, @bitCast(usize, GetWindowLongPtrW(win, 0)));
-            window.addEvent(.{ .CloseRequest = {} }) catch return @intToPtr(LRESULT, 1);
-            return null;
+            window.addEvent(.{ .CloseRequest = {} }) catch return 1;
+            return 0;
         },
 
         user32.WM_CREATE => {
-            const createstruct = @ptrCast(*CREATESTRUCTW, @alignCast(@alignOf(*CREATESTRUCTW), lparam));
+            const createstruct = @intToPtr(*CREATESTRUCTW, @bitCast(usize, lparam));
             const wcs = @ptrCast(*WindowCreationInfo, @alignCast(
                 @alignOf(WindowCreationInfo),
                 createstruct.lpCreateParams,
@@ -268,12 +277,12 @@ fn windowProc(win: HWND, msg: UINT, wparam: WPARAM, lparam: LPARAM) callconv(WIN
                 },
                 .hdc = user32.GetDC(win) orelse return fail_result,
             };
-            return null;
+            return 0;
         },
 
         user32.WM_SIZE => {
             const window = @intToPtr(*Instance.Window, @bitCast(usize, GetWindowLongPtrW(win, 0)));
-            const size = @ptrToInt(lparam);
+            const size = lparam;
             var client_rect = @as(RECT, undefined);
             _ = GetClientRect(win, &client_rect);
             const width = @intCast(u32, client_rect.right - client_rect.left);
@@ -290,7 +299,7 @@ fn windowProc(win: HWND, msg: UINT, wparam: WPARAM, lparam: LPARAM) callconv(WIN
                 }) catch return fail_result;
                 window._size.set(width, height);
             }
-            return null;
+            return 0;
         },
         user32.WM_PAINT => {
             const window = @intToPtr(*Instance.Window, @bitCast(usize, GetWindowLongPtrW(win, 0)));
@@ -306,7 +315,7 @@ fn windowProc(win: HWND, msg: UINT, wparam: WPARAM, lparam: LPARAM) callconv(WIN
                 },
             }) catch unreachable;
             _ = EndPaint(win, &ps);
-            return null;
+            return 0;
         },
 
         else => DefWindowProcW(win, msg, wparam, lparam),
@@ -320,7 +329,7 @@ fn messageWindowProc(win: HWND, msg: UINT, wparam: WPARAM, lparam: LPARAM) callc
 }
 
 const MessageThreadInputInfo = struct {
-    message_window_ready: *std.ResetEvent,
+    message_window_ready: *std.Thread.ResetEvent,
     message_window: *?HWND,
     allocator: *Allocator,
     instance_name: []const u8,
@@ -363,12 +372,12 @@ fn messageLoop(
             message_loop_terminate => return, // WE DONE
 
             message_loop_show_window => {
-                _ = user32.ShowWindow(message.hWnd, @bitCast(i32, @intCast(u32, message.wParam)));
+                _ = user32.ShowWindow(message.hWnd.?, @bitCast(i32, @intCast(u32, message.wParam)));
             },
 
             message_loop_create_window => {
                 // Unwrap the pipe we got sent in the lparam of the message
-                const window_create_pipe = @ptrCast(*WindowCreatePipe, @alignCast(@alignOf(*WindowCreatePipe), message.lParam));
+                const window_create_pipe = @intToPtr(*WindowCreatePipe, @bitCast(usize, message.lParam));
                 defer window_create_pipe.reset_event.set();
 
                 const name = std.unicode.utf8ToUtf16LeWithNull(allocator, window_create_pipe.in_name) catch continue;
@@ -510,7 +519,7 @@ pub const Instance = struct {
         errdefer allocator.free(instance_name);
 
         var message_window_opt = @as(?HWND, null);
-        var message_thread_ready: std.ResetEvent = @as(std.ResetEvent, undefined);
+        var message_thread_ready: std.Thread.ResetEvent = @as(std.Thread.ResetEvent, undefined);
         try message_thread_ready.init();
         defer message_thread_ready.deinit();
 
@@ -554,7 +563,7 @@ pub const Instance = struct {
         const Dim = struct { width: u32, height: u32 };
 
         const _Size = struct {
-            mutex: std.Mutex = .{},
+            mutex: std.Thread.Mutex = .{},
             width: u32,
             height: u32,
             fn get(self: *@This()) Dim {
@@ -571,7 +580,7 @@ pub const Instance = struct {
         };
 
         const Node = struct {
-            reset_event: std.StaticResetEvent = .{},
+            reset_event: std.Thread.StaticResetEvent = .{},
             next: ?*Node,
         };
 
@@ -635,10 +644,10 @@ pub const Instance = struct {
         }
 
         pub fn show(self: *@This()) void {
-            _ = PostMessageW(self.hwnd, message_loop_show_window, user32.SW_SHOW, null);
+            _ = PostMessageW(self.hwnd, message_loop_show_window, user32.SW_SHOW, 0);
         }
         pub fn hide(self: *@This()) void {
-            _ = PostMessageW(self.hwnd, message_loop_show_window, user32.SW_HIDE, null);
+            _ = PostMessageW(self.hwnd, message_loop_show_window, user32.SW_HIDE, 0);
         }
         pub fn blit(
             self: *@This(),
@@ -694,11 +703,11 @@ pub const Instance = struct {
             .in_x = x,
             .in_y = y,
             .in_flags = create_flags,
-            .reset_event = @as(std.ResetEvent, undefined),
+            .reset_event = @as(std.Thread.ResetEvent, undefined),
         };
         try window_create_pipe.reset_event.init();
 
-        _ = PostMessageW(self.message_window, message_loop_create_window, 0, &window_create_pipe);
+        _ = PostMessageW(self.message_window, message_loop_create_window, 0, @bitCast(LPARAM, @ptrToInt(&window_create_pipe)));
         window_create_pipe.reset_event.wait();
         if (window_create_pipe.out_win) |window| {
             return window;
@@ -708,7 +717,7 @@ pub const Instance = struct {
     }
 
     pub fn deinit(self: *@This()) void {
-        _ = PostMessageW(self.message_window, message_loop_terminate, 0, null);
+        _ = PostMessageW(self.message_window, message_loop_terminate, 0, 0);
         self.message_thread.wait();
         self.allocator.free(self.instance_name);
     }

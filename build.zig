@@ -23,6 +23,7 @@ fn addIspcObject(b: *Builder, exe: anytype, in_file: []const u8, target: ?[]cons
         out_file,
         "--addressing=64",
         target_param,
+        "-g",
         if (is_release) "-O3" else "-O0",
     });
     exe.step.dependOn(&run_cmd.step);
@@ -43,7 +44,6 @@ pub fn build(b: *Builder) !void {
     const exe = b.addExecutable("ispc-raytracer", "src/main.zig");
     exe.setTarget(target);
     exe.setBuildMode(mode);
-    exe.subsystem = .Windows;
     try addIspcObject(b, exe, "src/raytrace.ispc", null, b.is_release);
     exe.install();
 
@@ -55,4 +55,10 @@ pub fn build(b: *Builder) !void {
 
     const run_step = b.step("run", "Run the app");
     run_step.dependOn(&run_cmd.step);
+
+    var main_tests = b.addTest("src/main.zig");
+    main_tests.setBuildMode(mode);
+
+    const test_step = b.step("test", "Run app tests");
+    test_step.dependOn(&main_tests.step);
 }
